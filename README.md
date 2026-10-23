@@ -168,6 +168,17 @@ Every paid request below went through `verifier/server.mjs` (402 -> `pay` -> ret
 
 Measured on mainnet: pay -> receipt 0.34-1.03 s, server-side verification 0.67-0.85 s.
 
+In-app run from the live GitHub Pages app (endpoint #2, the connected wallet is provider and payee, the agent key lives in
+the browser; recorded in the walkthrough video):
+
+- Register "GET /v1/weather (demo)" at 0.01: [0xf891ac03...](https://explorer.arc.io/tx/0xf891ac03e1d534aacc0432b073d75e9a80dc534d2b4459d4f4cfb5a99486fc23)
+- Paris, Tokyo, Lima, each verified by the in-page API before it answered: [0x6e7c7349...](https://explorer.arc.io/tx/0x6e7c7349b727520e98262fcfb380d0c5f2b21139f7cfe6d43c7da86a80fffe13), [0xa3af3a87...](https://explorer.arc.io/tx/0xa3af3a87df20cc6d845ad277705e5d3e7b7551bfc9a1d5d513afa2c623766b52), [0x753c4348...](https://explorer.arc.io/tx/0x753c4348f9dd32807e704fe00d4be7af04973b03106dae0a64a31003cda2c9db)
+- "Send the duplicate anyway": FAILED on-chain with `AlreadyPaid`: [0x35eb0d42...](https://explorer.arc.io/tx/0x35eb0d42897b3879bf636daf36aa89b831acc7a01a549577bfdcfeee8204e60f)
+- Refund Tokyo: [0xe8b655e6...](https://explorer.arc.io/tx/0xe8b655e6a5331f4cb2a8f23f5ffba2500ad33d0c933b57a84122d0604d630ccd); withdraw the credit: [0xa6a198b8...](https://explorer.arc.io/tx/0xa6a198b8f8e56be805f0a62500b8feb71b79d65c30ad761f56e75a73f14b2ed0)
+
+Walkthrough video (2:50): https://github.com/swiftbotlab/usdc-pay-per-request/releases/download/v1.0.0/usdc-pay-per-request-arc-mainnet.mp4
+Source verified (exact match) on [explorer.arc.io](https://explorer.arc.io/address/0xe741f95adfa3d68bdb8368734b01ca4575a36119?tab=contract) and [explorer.testnet.arc.io](https://explorer.testnet.arc.io/address/0x830f1801b91f1de0c228cf37ebfc0c211edff991?tab=contract) (via Sourcify).
+
 ## How this repository was built
 
 - `contracts/`, `src/`, `public/`, `scripts/` and the configs come unchanged from the Arc Studio workspace (session
