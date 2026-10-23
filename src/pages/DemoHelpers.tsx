@@ -17,7 +17,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { type NetworkKey, NETWORKS } from '../config/networks';
 import { ABI } from '../config/abi';
 import { formatUsdc, formatAddr, formatB32, txUrl } from '../lib/format';
-import { decodeContractError } from '../lib/errors';
+import { decodeContractError, CAN_PAY_REASONS } from '../lib/errors';
 import { getGasOverrides } from '../lib/gas';
 import { computeRequestId } from '../lib/paywall';
 
@@ -169,7 +169,7 @@ export function CheatStep({ net, city, txHash, requestId, price, endpointId, age
   interface CheatResult { ok: boolean; msg: string; link?: string }
   const [results, setResults] = useState<Record<string, CheatResult | 'running'>>({});
 
-  const canPayReasons = ['OK', 'UnknownEndpoint', 'EndpointInactive', 'WrongAmount', 'AlreadyPaid', 'RequestNotForPayer'];
+  const canPayReasons = CAN_PAY_REASONS;
 
   // (a) Reuse Paris tx for Rome via in-page API
   const runCheatA = async () => {

@@ -6,7 +6,7 @@
 
 import {
   createPublicClient, http, type Hex, type PublicClient,
-  parseEther, hexToBigInt,
+  parseEther, parseEventLogs,
 } from 'viem';
 import type { Chain } from 'viem';
 import { ABI } from '../config/abi';
@@ -98,7 +98,7 @@ export async function callWeatherApi(params: {
     return { status: 402, body, token: tok, requestId };
   }
 
-  // Phase 2: token + tx → verify
+  // Phase 2: token + tx → verify (mirrors server.mjs verifyPayment exactly)
   onLog(makeLog('api', `Received retry with X-Paywall-Token + X-Paywall-Tx`, { voice: 'api' }));
   const { requestId } = computeRequestId({ chainId: cfg.chainId, contract: cfg.contractAddress, endpointId: cfg.endpointId, payer, resource, token });
 
@@ -106,13 +106,13 @@ export async function callWeatherApi(params: {
     return { status: 400, body: { error: 'missing_tx', message: 'X-Paywall-Tx required' } };
   }
 
-  // Verify receipt
+  // 1. Fetch receipt
   onLog(makeLog('api', `Checking tx receipt on-chain…`, { voice: 'api' }));
   const t1 = Date.now();
   let receipt;
   try {
     receipt = await publicClient.getTransactionReceipt({ hash: txHash });
-  } catch (e) {
+  } catch {
     onLog(makeLog('api', `RPC error checking receipt`, { error: true }));
     return { status: 502, body: { error: 'rpc_unavailable' } };
   }
@@ -122,28 +122,44 @@ export async function callWeatherApi(params: {
 
   onLog(makeLog('contract', `Receipt found — block ${receipt.blockNumber}, status success`, { durationMs: Date.now() - t1, link: `${cfg.explorer}/tx/${txHash}`, linkLabel: 'View tx' }));
 
-  // Check Paid log
-  const paidLog = receipt.logs.find(l =>
-    l.address.toLowerCase() === cfg.contractAddress.toLowerCase() &&
-    l.topics.length === 4 &&
-    l.topics[2]?.toLowerCase() === ('0x' + '0'.repeat(24) + payer.slice(2).toLowerCase())
-  );
+  // 2. Decode Paid events with parseEventLogs (handles ABI topic layout correctly)
+  //    Paid: topics[0]=sig, topics[1]=endpointId, topics[2]=requestId, topics[3]=payer
+  const allPaid = parseEventLogs({ abi: ABI, eventName: 'Paid', logs: receipt.logs });
+  const contractPaid = allPaid.filter(l => l.address.toLowerCase() === cfg.contractAddress.toLowerCase());
 
-  if (!paidLog) {
-    onLog(makeLog('api', `No Paid event found for payer ${payer.slice(0, 8)}…`, { error: true }));
-    return { status: 402, body: { error: 'no_matching_payment', message: 'No Paid event for this request' } };
+  const matchingLogs = contractPaid.filter(l => {
+    const a = l.args as { endpointId?: bigint; requestId?: Hex; payer?: string; amount?: bigint };
+    return (
+      a.endpointId === cfg.endpointId &&
+      a.requestId?.toLowerCase() === requestId.toLowerCase() &&
+      a.payer?.toLowerCase() === payer.toLowerCase()
+    );
+  });
+
+  if (matchingLogs.length !== 1) {
+    onLog(makeLog('api', `No matching Paid event (endpointId=${cfg.endpointId}, requestId=${requestId.slice(0,10)}…, payer=${payer.slice(0,8)}…) — found ${matchingLogs.length}`, { error: true }));
+    return { status: 402, body: { error: 'no_matching_payment', message: 'No Paid event matching this endpoint + requestId + payer' } };
   }
 
-  // The requestId is topic[1]
-  const logRid = paidLog.topics[1]?.toLowerCase();
-  if (logRid !== requestId.toLowerCase()) {
-    onLog(makeLog('api', `requestId mismatch in Paid event`, { error: true }));
-    return { status: 402, body: { error: 'no_matching_payment', message: 'requestId mismatch' } };
+  const paidLog = matchingLogs[0];
+  const logArgs = paidLog.args as { endpointId?: bigint; requestId?: Hex; payer?: string; amount?: bigint };
+  onLog(makeLog('contract', `Paid event: endpointId=${cfg.endpointId}, requestId matches, payer confirmed`, { voice: 'contract' }));
+
+  // 3. Require >= 1 confirmation
+  let latestBlock: bigint;
+  try {
+    latestBlock = await publicClient.getBlockNumber();
+  } catch {
+    return { status: 502, body: { error: 'rpc_unavailable' } };
   }
+  const confirmations = latestBlock - receipt.blockNumber + 1n;
+  if (confirmations < 1n) {
+    onLog(makeLog('contract', `Only ${confirmations} confirmations — waiting`, { error: true }));
+    return { status: 402, body: { error: 'insufficient_confirmations', message: `${confirmations} confirmation(s), need >= 1` } };
+  }
+  onLog(makeLog('contract', `${confirmations} confirmation(s)`, { voice: 'contract' }));
 
-  onLog(makeLog('contract', `Paid event: requestId matches, payer confirmed`, { voice: 'contract' }));
-
-  // getPayment(requestId) — confirm not refunded
+  // 4. getPayment(requestId) — final ground truth
   const t2 = Date.now();
   let payment;
   try {
@@ -154,11 +170,14 @@ export async function callWeatherApi(params: {
     return { status: 502, body: { error: 'rpc_unavailable' } };
   }
 
-  onLog(makeLog('contract', `getPayment: payer=${payment.payer.slice(0, 8)}…, refunded=${payment.refunded}, amount=${formatE(payment.amount)} USDC`, { durationMs: Date.now() - t2 }));
+  onLog(makeLog('contract', `getPayment: payer=${payment.payer.slice(0, 8)}…, endpointId=${payment.endpointId}, refunded=${payment.refunded}, amount=${formatE(payment.amount)} USDC`, { durationMs: Date.now() - t2 }));
 
-  if (payment.payer === '0x' + '0'.repeat(40)) return { status: 402, body: { error: 'payment_not_visible_yet' } };
-  if (payment.refunded) return { status: 402, body: { error: 'payment_refunded', message: 'Provider refunded this request' } };
+  const ZERO_ADDR = '0x' + '0'.repeat(40);
+  if (payment.payer === ZERO_ADDR) return { status: 402, body: { error: 'payment_not_visible_yet' } };
   if (payment.payer.toLowerCase() !== payer.toLowerCase()) return { status: 402, body: { error: 'payer_mismatch' } };
+  if (payment.endpointId !== cfg.endpointId) return { status: 402, body: { error: 'endpoint_mismatch' } };
+  if (payment.refunded) return { status: 402, body: { error: 'payment_refunded', message: 'Provider refunded this request' } };
+  if (logArgs.amount !== undefined && payment.amount !== logArgs.amount) return { status: 402, body: { error: 'amount_mismatch' } };
 
   onLog(makeLog('api', `Payment verified — serving response`, { durationMs: Date.now() - t0 }));
 

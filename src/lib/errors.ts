@@ -4,6 +4,21 @@
 import { formatEther } from 'viem';
 import { formatAddr } from './format';
 
+/**
+ * canPay() reason codes — index matches the uint8 returned by the contract.
+ * 0 OK, 1 UnknownEndpoint, 2 EndpointInactive, 3 ZeroRequestId,
+ * 4 RequestNotForPayer, 5 AlreadyPaid, 6 WrongAmount
+ */
+export const CAN_PAY_REASONS: readonly string[] = [
+  'OK',
+  'UnknownEndpoint',
+  'EndpointInactive',
+  'ZeroRequestId',
+  'RequestNotForPayer',
+  'AlreadyPaid',
+  'WrongAmount',
+];
+
 export function decodeContractError(err: unknown): string {
   if (!err) return 'Unknown error.';
   const msg = (err as { message?: string; shortMessage?: string })?.shortMessage

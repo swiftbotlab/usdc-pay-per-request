@@ -12,7 +12,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { type NetworkKey, NETWORKS } from '../config/networks';
 import { ABI } from '../config/abi';
 import { formatUsdc, formatAddr, txUrl } from '../lib/format';
-import { decodeContractError } from '../lib/errors';
+import { decodeContractError, CAN_PAY_REASONS } from '../lib/errors';
 import { callWeatherApi, type LogEntry, type DemoApiConfig } from '../lib/demoApi';
 import { getGasOverrides } from '../lib/gas';
 
@@ -301,8 +301,7 @@ export function DemoPage({ net }: Props) {
         setRunning(false); return;
       }
       if (!canPayResult[0]) {
-        const reasons = ['OK', 'UnknownEndpoint', 'EndpointInactive', 'WrongAmount', 'AlreadyPaid', 'RequestNotForPayer'];
-        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: canPay failed — ${reasons[canPayResult[1]] ?? `reason ${canPayResult[1]}`}`, error: true });
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: canPay failed — ${CAN_PAY_REASONS[canPayResult[1]] ?? `reason ${canPayResult[1]}`}`, error: true });
         setRunning(false); return;
       }
       addLog({ id: nextId(), voice: 'agent', msg: `Checks passed — payerOf ✓, canPay ✓ — paying…` });
