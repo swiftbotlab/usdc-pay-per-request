@@ -148,7 +148,12 @@ export async function callWeatherApi(params: {
   // 3. Require >= 1 confirmation
   let latestBlock: bigint;
   try {
-    latestBlock = await publicClient.getBlockNumber();
+    // Hand fix (disclosed): viem caches getBlockNumber for a few seconds; read it fresh and give a lagging node up to 5 s
+    latestBlock = await publicClient.getBlockNumber({ cacheTime: 0 });
+    for (let i = 0; i < 5 && latestBlock < receipt.blockNumber; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      latestBlock = await publicClient.getBlockNumber({ cacheTime: 0 });
+    }
   } catch {
     return { status: 502, body: { error: 'rpc_unavailable' } };
   }

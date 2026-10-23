@@ -187,6 +187,8 @@ Measured on mainnet: pay -> receipt 0.34-1.03 s, server-side verification 0.67-0
   balance when the transaction hash came back instead of after the receipt, so step 3 stayed open; it now re-reads after the receipt.
   Studio's next turn kept hand fixes 2 and 3 (we uploaded that file) and fixed the in-page API's Paid-event check and the
   canPay reason labels that our live mainnet run exposed.
+- Hand fix 4 (disclosed, 5 lines in `src/lib/demoApi.ts`): the in-page API's confirmation check read viem's cached block
+  number (a few seconds old) and refused fresh payments with 0 confirmations; it now reads the head uncached and waits up to 5 s.
 - GitHub Pages: `.github/workflows/pages.yml` runs the same Vite build Studio ran (bun, frozen lockfile), because the
   Studio workspace export does not include `dist/`.
 
