@@ -12,9 +12,9 @@ function cspPlugin(): Plugin {
       const csp = [
         "default-src 'none'",
         "script-src 'self'",
-        "style-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "img-src 'self' data:",
-        "font-src 'self'",
+        "font-src 'self' https://fonts.gstatic.com",
         "connect-src https://rpc.mainnet.arc.io https://rpc.testnet.arc.io",
         "object-src 'none'",
         "base-uri 'none'",
