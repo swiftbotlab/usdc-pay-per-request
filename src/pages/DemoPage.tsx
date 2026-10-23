@@ -203,10 +203,13 @@ export function DemoPage({ net }: Props) {
 
   // Register endpoint
   const { writeContract: writeRegister, data: regHash, isPending: regPending } = useWriteContract();
-  const { isLoading: regConfirming } = useWaitForTransactionReceipt({ hash: regHash });
+  const { isLoading: regConfirming, isSuccess: regMined } = useWaitForTransactionReceipt({ hash: regHash });
 
   const { sendTransaction: sendFund, data: fundHash, isPending: fundPending } = useSendTransaction();
-  const { isLoading: fundConfirming } = useWaitForTransactionReceipt({ hash: fundHash });
+  const { isLoading: fundConfirming, isSuccess: fundMined } = useWaitForTransactionReceipt({ hash: fundHash });
+  // Hand fix (disclosed): re-read after the receipt, not when the hash is returned (the endpoint and balance were read too early)
+  useEffect(() => { if (regMined) { void refetchEndpoints(); void refetchEpData(); } }, [regMined, refetchEndpoints, refetchEpData]);
+  useEffect(() => { if (fundMined && agentAddr && publicClient) { publicClient.getBalance({ address: agentAddr }).then(setAgentNativeBal).catch(() => {}); } }, [fundMined, agentAddr, publicClient]);
 
   const handleGenerateKey = () => {
     const pk = generatePrivateKey();

@@ -183,6 +183,8 @@ Measured on mainnet: pay -> receipt 0.34-1.03 s, server-side verification 0.67-0
   ConnectKit injects; we patched `vite.config.ts` by hand (commit 3e1fdf1) and Studio's next turn made the identical change.
 - Hand fix 2 (disclosed, 2 lines in `src/pages/DemoPage.tsx`): the demo replay asked for logs up to `deploymentBlock + 8999`,
   which the Arc RPC rejects while that block is still in the future; the window now ends at the current head.
+- Hand fix 3 (disclosed, 4 lines in `src/pages/DemoPage.tsx`): the demo re-read the registered endpoint and the agent's
+  balance when the transaction hash came back instead of after the receipt, so step 3 stayed open; it now re-reads after the receipt.
 - GitHub Pages: `.github/workflows/pages.yml` runs the same Vite build Studio ran (bun, frozen lockfile), because the
   Studio workspace export does not include `dist/`.
 
