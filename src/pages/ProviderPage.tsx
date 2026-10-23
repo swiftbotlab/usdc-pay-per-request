@@ -45,7 +45,7 @@ function ProviderPageInner({ net, address, chainId, switchChain }: {
   const refetchAll = () => { void refetchCredit(); void refetchEndpoints(); };
 
   return (
-    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px' }}>
+    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px', overflow: 'hidden' }}>
       <h1 className="display" style={{ fontSize: 26, fontWeight: 700, margin: '0 0 6px', color: 'var(--ink)', letterSpacing: '-0.03em' }}>Provider Dashboard</h1>
       <p style={{ fontSize: 14, color: 'var(--muted)', margin: '0 0 32px' }}>
         Connected as <span className="mono" style={{ fontSize: 12 }}>{formatAddr(address)}</span>
@@ -440,7 +440,14 @@ function EndpointLogTable({ net, id, epPayee, isCorrectChain, onRefundDone }: {
       )}
       {rows.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+            <colgroup>
+              <col style={{ width: '34%' }} />
+              <col style={{ width: '24%' }} />
+              <col style={{ width: '18%' }} />
+              <col style={{ width: '14%' }} />
+              {isPayee && <col style={{ width: '10%' }} />}
+            </colgroup>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--muted)', textAlign: 'left' }}>
                 <th style={{ padding: '4px 6px 6px 0', fontWeight: 500 }}>requestId</th>
@@ -453,13 +460,13 @@ function EndpointLogTable({ net, id, epPayee, isCorrectChain, onRefundDone }: {
             <tbody>
               {rows.map((r, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '5px 6px 5px 0', fontFamily: "'JetBrains Mono', monospace" }}>
+                  <td style={{ padding: '5px 6px 5px 0', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
                     <a href={`#/${net}/r/${r.requestId}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>{formatB32(r.requestId)}</a>
                     {r.refunded && <span style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 8, fontSize: 10, fontWeight: 600, background: '#fef2f2', color: '#991b1b' }}>Refunded</span>}
                   </td>
-                  <td style={{ padding: '5px 6px', fontFamily: "'JetBrains Mono', monospace', color: 'var(--ink-2)'" }}>{formatAddr(r.payer)}</td>
+                  <td style={{ padding: '5px 6px', fontFamily: "'JetBrains Mono', monospace", color: 'var(--ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>{formatAddr(r.payer)}</td>
                   <td style={{ padding: '5px 6px', tabularNums: true } as React.CSSProperties}>{formatUsdc(r.amount)} USDC</td>
-                  <td style={{ padding: '5px 6px', color: 'var(--muted)' }}>{String(r.blockNumber)}</td>
+                  <td style={{ padding: '5px 6px', color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(r.blockNumber)}</td>
                   {isPayee && (
                     <td style={{ padding: '5px 6px' }}>
                       <button onClick={() => handleRefund(r.requestId, r.amount)}

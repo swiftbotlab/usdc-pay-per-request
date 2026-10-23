@@ -83,7 +83,14 @@ export function ReplayPanel({ net, endpointId, events, loading, epData, payeeCre
       )}
       {!loading && events && events.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed', minWidth: 460 }}>
+            <colgroup>
+              <col style={{ width: '18%' }} />
+              <col style={{ width: '26%' }} />
+              <col style={{ width: '20%' }} />
+              <col style={{ width: '18%' }} />
+              <col style={{ width: '18%' }} />
+            </colgroup>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--muted)', textAlign: 'left' }}>
                 <th style={{ padding: '4px 8px 8px 0', fontWeight: 500 }}>Event</th>
@@ -98,7 +105,7 @@ export function ReplayPanel({ net, endpointId, events, loading, epData, payeeCre
                 const isRefunded = e.type === 'Paid' && e.requestId && refundedSet.has(e.requestId.toLowerCase());
                 return (
                   <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                    <td style={{ padding: '6px 8px 6px 0', verticalAlign: 'middle' }}>
+                    <td style={{ padding: '6px 8px 6px 0', verticalAlign: 'middle', overflow: 'hidden' }}>
                       <span style={{ display: 'inline-block', padding: '2px 7px', borderRadius: 10, fontSize: 11, fontWeight: 600,
                         background: e.type === 'Paid' ? '#dcfce7' : e.type === 'Refunded' ? '#fef2f2' : e.type === 'PriceChanged' ? '#eff6ff' : '#fef3c7',
                         color: e.type === 'Paid' ? '#166534' : e.type === 'Refunded' ? '#991b1b' : e.type === 'PriceChanged' ? '#1e40af' : '#92400e' }}>
@@ -106,7 +113,7 @@ export function ReplayPanel({ net, endpointId, events, loading, epData, payeeCre
                       </span>
                       {isRefunded && <span style={{ marginLeft: 4, padding: '1px 5px', borderRadius: 8, fontSize: 10, fontWeight: 600, background: '#fef2f2', color: '#991b1b' }}>Refunded</span>}
                     </td>
-                    <td style={{ padding: '6px 8px', fontFamily: "'JetBrains Mono', monospace", verticalAlign: 'middle' }}>
+                    <td style={{ padding: '6px 8px', fontFamily: "'JetBrains Mono', monospace", verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
                       {e.requestId ? (
                         <a href={`#/${net}/r/${e.requestId}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>
                           {formatB32(e.requestId)}
@@ -117,13 +124,13 @@ export function ReplayPanel({ net, endpointId, events, loading, epData, payeeCre
                         <span style={{ color: 'var(--muted)' }}>{e.payer}</span>
                       ) : '—'}
                     </td>
-                    <td style={{ padding: '6px 8px', fontFamily: "'JetBrains Mono', monospace", verticalAlign: 'middle', color: 'var(--ink-2)' }}>
+                    <td style={{ padding: '6px 8px', fontFamily: "'JetBrains Mono', monospace", verticalAlign: 'middle', color: 'var(--ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
                       {e.payer && e.type !== 'ActiveSet' && e.type !== 'PriceChanged' ? formatAddr(e.payer) : '—'}
                     </td>
                     <td style={{ padding: '6px 8px', fontFamily: 'inherit', verticalAlign: 'middle', tabularNums: true } as React.CSSProperties}>
                       {e.amount !== undefined && e.type !== 'PriceChanged' ? `${formatUsdc(e.amount)} USDC` : '—'}
                     </td>
-                    <td style={{ padding: '6px 8px', verticalAlign: 'middle' }}>
+                    <td style={{ padding: '6px 8px', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.txHash ? <a href={txUrl(cfg.explorer, e.txHash)} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>{e.txHash.slice(0, 8)}…</a> : '—'}
                     </td>
                   </tr>

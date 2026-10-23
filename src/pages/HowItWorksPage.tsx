@@ -29,7 +29,7 @@ export function HowItWorksPage({ net }: Props) {
   });
 
   return (
-    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px' }}>
+    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px', overflow: 'hidden' }}>
       {!cfg.address ? (
         <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--muted)' }}>Not deployed yet on this network.</div>
       ) : (
@@ -42,7 +42,10 @@ export function HowItWorksPage({ net }: Props) {
             <h1 className="display" style={{ fontSize: 36, fontWeight: 700, margin: '0 0 12px', color: 'var(--ink)', lineHeight: 1.15, letterSpacing: '-0.03em' }}>
               USDC Pay-per-Request
             </h1>
-            <p style={{ fontSize: 16, color: 'var(--muted)', maxWidth: 520, margin: '0 auto', lineHeight: 1.6 }}>
+            <p style={{ fontSize: 15, fontWeight: 500, color: 'var(--ink-2)', maxWidth: 560, margin: '0 auto 10px', lineHeight: 1.55 }}>
+              Agents and scripts can't sign up for API plans or hold API keys. Here they pay per request in USDC on Arc: one contract call, one on-chain receipt, no accounts.
+            </p>
+            <p style={{ fontSize: 15, color: 'var(--muted)', maxWidth: 520, margin: '0 auto', lineHeight: 1.6 }}>
               An HTTP 402 paywall settled on Arc: agents pay per request in USDC, APIs verify on-chain.
             </p>
           </div>

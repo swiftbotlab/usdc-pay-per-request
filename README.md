@@ -200,6 +200,7 @@ Source verified (exact match) on [explorer.arc.io](https://explorer.arc.io/addre
   canPay reason labels that our live mainnet run exposed.
 - Hand fix 4 (disclosed, 5 lines in `src/lib/demoApi.ts`): the in-page API's confirmation check read viem's cached block
   number (a few seconds old) and refused fresh payments with 0 confirmations; it now reads the head uncached and waits up to 5 s.
+  Studio's last turn kept it (we uploaded that file) and made the layout responsive at 375 px plus the problem line on the first screen.
 - GitHub Pages: `.github/workflows/pages.yml` runs the same Vite build Studio ran (bun, frozen lockfile), because the
   Studio workspace export does not include `dist/`.
 

@@ -383,7 +383,7 @@ export function DemoPage({ net }: Props) {
   const tokyoResult = results['Tokyo'] ?? null;
 
   return (
-    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px' }}>
+    <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px', overflow: 'hidden' }}>
       <h1 className="display" style={{ fontSize: 28, fontWeight: 700, margin: '0 0 6px', color: 'var(--ink)', letterSpacing: '-0.03em' }}>
         An agent buys weather data, one request at a time
       </h1>
@@ -493,7 +493,7 @@ export function DemoPage({ net }: Props) {
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, flexShrink: 0, padding: '1px 6px', borderRadius: 4, background: e.voice === 'agent' ? '#1e3a5f' : e.voice === 'api' ? '#1e4d2e' : '#3d1e0f', color: e.voice === 'agent' ? '#93c5fd' : e.voice === 'api' ? '#86efac' : '#fdba74' }}>
                   {e.voice.toUpperCase()}
                 </span>
-                <span style={{ color: e.error ? '#fca5a5' : '#e2e8f0', lineHeight: 1.5, flex: 1 }}>
+                <span style={{ color: e.error ? '#fca5a5' : '#e2e8f0', lineHeight: 1.5, flex: 1, overflowWrap: 'break-word', minWidth: 0 }}>
                   {e.msg}
                   {e.link ? <> · <a href={e.link} target="_blank" rel="noopener noreferrer" style={{ color: '#93c5fd' }}>{e.linkLabel ?? 'link'}</a></> : null}
                   {e.durationMs !== undefined && <span style={{ color: '#64748b' }}> ({e.durationMs}ms)</span>}
