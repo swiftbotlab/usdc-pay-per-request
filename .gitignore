@@ -1,0 +1,7 @@
+contracts/out
+contracts/cache
+.env*
+console.jsonl
+traces.jsonl
+node_modules
+dist
