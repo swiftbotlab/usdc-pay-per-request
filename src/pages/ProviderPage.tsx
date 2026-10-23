@@ -1,10 +1,11 @@
 import { useState } from 'react';
+import React from 'react';
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useSwitchChain } from 'wagmi';
 import { toast } from 'sonner';
-import { parseEther, type Hex, isAddress } from 'viem';
+import { parseEther, type Hex, isAddress, createPublicClient, http } from 'viem';
 import { type NetworkKey, NETWORKS } from '../config/networks';
 import { ABI } from '../config/abi';
-import { formatUsdc, formatAddr, txUrl } from '../lib/format';
+import { formatUsdc, formatAddr, formatB32, txUrl } from '../lib/format';
 import { decodeContractError } from '../lib/errors';
 
 interface Props { net: NetworkKey }
@@ -269,6 +270,220 @@ function EndpointCard({ net, id, providerAddr, isCorrectChain, onDone }: { net: 
         </button>
       </div>
       <p style={{ fontSize: 11, color: 'var(--muted)', margin: '6px 0 0' }}>Price change applies to new payments only.</p>
+      <EndpointLogTable net={net} id={id} payeeCredit={ep ? undefined : undefined} epPayee={ep?.payee} isCorrectChain={isCorrectChain} myCredit={undefined} onRefundDone={onDone} />
+    </div>
+  );
+}
+
+// ── Paid-request log table for an endpoint (F5) ──
+interface PaidRow {
+  blockNumber: bigint;
+  txHash: string;
+  requestId: Hex;
+  payer: string;
+  amount: bigint;
+  paidAt: number; // timestamp from block (may be 0 if unavailable)
+  refunded: boolean;
+}
+
+function EndpointLogTable({ net, id, epPayee, isCorrectChain, onRefundDone }: {
+  net: NetworkKey;
+  id: bigint;
+  epPayee: string | undefined;
+  payeeCredit: bigint | undefined;
+  isCorrectChain: boolean;
+  myCredit: bigint | undefined;
+  onRefundDone: () => void;
+}) {
+  const cfg = NETWORKS[net];
+  const { address } = useAccount();
+  const [rows, setRows] = useState<PaidRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [incomplete, setIncomplete] = useState(false);
+  const scanStateRef = React.useRef<{ nextHead: bigint } | null>(null);
+
+  const { data: myCredit, refetch: refetchCredit } = useReadContract({
+    address: cfg.address, abi: ABI, functionName: 'creditOf',
+    args: [address ?? '0x0000000000000000000000000000000000000000'],
+    chainId: cfg.chain.id, query: { enabled: !!address },
+  });
+
+  const CHUNK = 9000n;
+  const MAX_CHUNKS = 40;
+
+  const PAID_EVENT = {
+    type: 'event' as const, name: 'Paid' as const,
+    inputs: [
+      { name: 'endpointId', type: 'uint256', indexed: true },
+      { name: 'requestId', type: 'bytes32', indexed: true },
+      { name: 'payer', type: 'address', indexed: true },
+      { name: 'payee', type: 'address', indexed: false },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  };
+  const REFUNDED_EVENT = {
+    type: 'event' as const, name: 'Refunded' as const,
+    inputs: [
+      { name: 'endpointId', type: 'uint256', indexed: true },
+      { name: 'requestId', type: 'bytes32', indexed: true },
+      { name: 'payer', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  };
+
+  const loadLogs = async (loadMore: boolean) => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const pc = createPublicClient({ chain: cfg.chain, transport: http(cfg.rpc) });
+      const head = await pc.getBlockNumber();
+      // Backwards: start from head (or previous scan head - 1) down to deploymentBlock
+      const start = loadMore && scanStateRef.current ? scanStateRef.current.nextHead : head;
+      const floor = cfg.deploymentBlock;
+
+      const newRows: PaidRow[] = [];
+      let refundedSet = new Set<string>();
+
+      // Collect refunds in parallel chunks (same window) — first pass: scan and collect
+      const chunksToScan: Array<{ from: bigint; to: bigint }> = [];
+      let cur = start;
+      let chunksScanned = 0;
+      while (cur >= floor && chunksScanned < MAX_CHUNKS) {
+        const from = cur - CHUNK + 1n < floor ? floor : cur - CHUNK + 1n;
+        chunksToScan.push({ from, to: cur });
+        cur = from - 1n;
+        chunksScanned++;
+      }
+
+      // Scan 4 chunks in parallel
+      const incomplete_ = cur >= floor;
+      const batches: Array<Array<{ from: bigint; to: bigint }>> = [];
+      for (let i = 0; i < chunksToScan.length; i += 4) batches.push(chunksToScan.slice(i, i + 4));
+
+      for (const batch of batches) {
+        const results = await Promise.all(batch.map(async ({ from, to }) => {
+          const [paid, refunded] = await Promise.all([
+            pc.getLogs({ address: cfg.address, event: PAID_EVENT, args: { endpointId: id }, fromBlock: from, toBlock: to }).catch(() => []),
+            pc.getLogs({ address: cfg.address, event: REFUNDED_EVENT, args: { endpointId: id }, fromBlock: from, toBlock: to }).catch(() => []),
+          ]);
+          return { paid, refunded };
+        }));
+        for (const { refunded } of results) {
+          for (const l of refunded) {
+            const a = l.args as { requestId?: Hex };
+            if (a.requestId) refundedSet.add(a.requestId.toLowerCase());
+          }
+        }
+        for (const { paid } of results) {
+          for (const l of paid) {
+            const a = l.args as { requestId?: Hex; payer?: string; amount?: bigint };
+            if (!a.requestId) continue;
+            newRows.push({
+              blockNumber: l.blockNumber ?? 0n,
+              txHash: l.transactionHash ?? '',
+              requestId: a.requestId,
+              payer: a.payer ?? '',
+              amount: a.amount ?? 0n,
+              paidAt: 0,
+              refunded: refundedSet.has(a.requestId.toLowerCase()),
+            });
+          }
+        }
+      }
+
+      // Sort descending by block
+      newRows.sort((a, b) => (a.blockNumber > b.blockNumber ? -1 : a.blockNumber < b.blockNumber ? 1 : 0));
+
+      scanStateRef.current = { nextHead: cur };
+      setHasMore(incomplete_);
+      setIncomplete(incomplete_);
+      setRows(prev => loadMore ? [...prev, ...newRows] : newRows);
+    } catch (e) {
+      setError(String(e));
+    }
+    setLoading(false);
+  };
+
+  const { writeContract: writeRefund, data: refundHash, isPending: refundP } = useWriteContract();
+  const { isLoading: refundC, isSuccess: refundDone } = useWaitForTransactionReceipt({ hash: refundHash });
+  React.useEffect(() => { if (refundDone) { void refetchCredit(); onRefundDone(); } }, [refundDone]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleRefund = (requestId: Hex, amount: bigint) => {
+    if (!isCorrectChain) return;
+    if (!window.confirm(`Refund ${formatUsdc(amount)} USDC for this request?`)) return;
+    writeRefund({ address: cfg.address, abi: ABI, functionName: 'refund', args: [requestId], chainId: cfg.chain.id }, {
+      onSuccess: h => toast.success('Refunded', { description: <a href={txUrl(cfg.explorer, h)} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>View</a> }),
+      onError: err => toast.error(decodeContractError(err)),
+    });
+  };
+
+  const isPayee = address && epPayee && address.toLowerCase() === epPayee.toLowerCase();
+
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>Paid requests</span>
+        <button onClick={() => { void loadLogs(false); }}
+          disabled={loading}
+          style={{ padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, background: 'var(--surface-muted)', cursor: 'pointer', fontFamily: "'DM Sans', sans-serif", opacity: loading ? 0.5 : 1 }}>
+          {loading ? 'Loading…' : rows.length === 0 ? 'Load history' : 'Reload'}
+        </button>
+      </div>
+      {error && (
+        <p style={{ fontSize: 12, color: 'var(--danger)', margin: '0 0 8px' }}>
+          Error loading logs. <button onClick={() => { void loadLogs(false); }} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 12, padding: 0 }}>Retry</button>
+          {incomplete && <span style={{ marginLeft: 6, color: 'var(--muted)' }}>History may be incomplete.</span>}
+        </p>
+      )}
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--muted)', textAlign: 'left' }}>
+                <th style={{ padding: '4px 6px 6px 0', fontWeight: 500 }}>requestId</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Payer</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Amount</th>
+                <th style={{ padding: '4px 6px', fontWeight: 500 }}>Block</th>
+                {isPayee && <th style={{ padding: '4px 6px', fontWeight: 500 }}>Action</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '5px 6px 5px 0', fontFamily: "'JetBrains Mono', monospace" }}>
+                    <a href={`#/${net}/r/${r.requestId}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}>{formatB32(r.requestId)}</a>
+                    {r.refunded && <span style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 8, fontSize: 10, fontWeight: 600, background: '#fef2f2', color: '#991b1b' }}>Refunded</span>}
+                  </td>
+                  <td style={{ padding: '5px 6px', fontFamily: "'JetBrains Mono', monospace', color: 'var(--ink-2)'" }}>{formatAddr(r.payer)}</td>
+                  <td style={{ padding: '5px 6px', tabularNums: true } as React.CSSProperties}>{formatUsdc(r.amount)} USDC</td>
+                  <td style={{ padding: '5px 6px', color: 'var(--muted)' }}>{String(r.blockNumber)}</td>
+                  {isPayee && (
+                    <td style={{ padding: '5px 6px' }}>
+                      <button onClick={() => handleRefund(r.requestId, r.amount)}
+                        disabled={r.refunded || !isCorrectChain || refundP || refundC || (myCredit !== undefined && myCredit < r.amount)}
+                        style={{ padding: '2px 8px', border: '1px solid var(--border)', borderRadius: 5, fontSize: 11, background: r.refunded ? 'var(--surface-muted)' : 'var(--surface-strong)', cursor: r.refunded ? 'default' : 'pointer', color: 'var(--ink-2)', fontFamily: "'DM Sans', sans-serif", opacity: (r.refunded || (myCredit !== undefined && myCredit < r.amount)) ? 0.4 : 1 }}>
+                        {r.refunded ? 'Refunded' : refundP || refundC ? '…' : 'Refund'}
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {hasMore && !loading && (
+        <button onClick={() => { void loadLogs(true); }}
+          style={{ marginTop: 8, padding: '5px 14px', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, background: 'var(--surface-muted)', cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>
+          Load older
+        </button>
+      )}
+      {incomplete && !loading && (
+        <p style={{ fontSize: 11, color: 'var(--muted)', margin: '4px 0 0' }}>History may be incomplete — scan limit reached.</p>
+      )}
     </div>
   );
 }

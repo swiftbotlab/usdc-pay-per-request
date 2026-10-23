@@ -66,12 +66,26 @@ Both deployments are byte-identical. No constructor args, no owner, no admin.
 
 ## Demo
 
-Open the app and click **Demo**. The demo:
-1. Generates a throwaway browser agent key
-2. Registers a demo endpoint (price 0.01 USDC mainnet / 0.05 testnet)
-3. Runs an agent buying weather data for Paris, Tokyo, Lima
-4. Shows the HTTP 402 flow with live logs (Agent / API / Contract)
-5. Demonstrates cheat prevention: AlreadyPaid, RequestNotForPayer
+**Replay panel.** Before connecting a wallet (or before step 3), the page fetches the scripted run that was recorded on endpoint #1 at deployment time — `Paid`, `Refunded`, `PriceChanged`, and `ActiveSet` events from blocks `deploymentBlock` to `deploymentBlock + 8999` in a single `getLogs` window per event type. Events are listed in block order with requestId links, payer, amount, and a Refunded badge. Below the table: `getEndpoint` totals and payee credit.
+
+**Interactive steps.**
+1. Connect wallet.
+2. Generate a throwaway browser agent key (stored in `localStorage`).
+3. Fund it (your wallet sends native USDC) and register a demo endpoint.
+4. Run the agent for Paris, Tokyo, Lima. Before paying, the agent: checks `payerOf(requestId)` on-chain, calls `canPay(endpointId, requestId, agent, price)`, rejects prices above 0.05 USDC. Live logs show three voices: AGENT, API, CONTRACT, with the real measured 402 latency.
+5. **Cheat panel** — four interactive rows:
+   - Reuse Paris token for Rome → API returns `no_matching_payment`.
+   - `canPay` on the Paris requestId again → `AlreadyPaid`.
+   - `canPay` with the connected wallet as payer on a fresh agent-bound requestId → `RequestNotForPayer`.
+   - "Send duplicate on-chain" — agent wallet sends `pay(endpointId, ParisRequestId)` with explicit `gas: 120000`, waits for receipt, shows "Failed on-chain: AlreadyPaid" with explorer link.
+6. **Step 6:** Refund Tokyo (connected wallet = payee), withdraw accumulated credit, sweep agent key balance back to wallet. Accounting shows endpoint-scoped totals (paid count, total paid, refund count, total refunded, wallet credit, agent native balance).
+
+## Hosting
+
+GitHub Pages: https://swiftbotlab.github.io/usdc-pay-per-request/ . The Arc Studio workspace export does not include
+`dist/`, so `.github/workflows/pages.yml` runs the same Vite build in GitHub Actions on every push to `main` (bun,
+frozen lockfile, `vite build --base=./`). GitHub Pages cannot send response headers: production builds carry a CSP
+meta tag and the app refuses to render inside foreign frames (except the Arc Studio preview).
 
 ## Tech stack
 
@@ -165,6 +179,8 @@ Measured on mainnet: pay -> receipt 0.34-1.03 s, server-side verification 0.67-0
   demo on Arc Testnet, then deployed the byte-identical bytecode to Arc mainnet.
 - `verifier/` (the 402 API server: Node >= 20, zero dependencies, no secrets, 34 tests) and `examples/agent_client.py` (a
   standalone paying client) are ours.
+- One hand fix (disclosed): the first production build crashed because its CSP (`style-src 'self'`) blocked the styles
+  ConnectKit injects; we patched `vite.config.ts` by hand (commit 3e1fdf1) and Studio's next turn made the identical change.
 - GitHub Pages: `.github/workflows/pages.yml` runs the same Vite build Studio ran (bun, frozen lockfile), because the
   Studio workspace export does not include `dist/`.
 

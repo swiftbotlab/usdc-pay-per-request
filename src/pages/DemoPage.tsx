@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import React from 'react';
 import {
   useAccount, useReadContract, useWriteContract,
   useWaitForTransactionReceipt, useSwitchChain, usePublicClient, useSendTransaction,
 } from 'wagmi';
 import { toast } from 'sonner';
 import {
-  createWalletClient, http, type Hex, parseEther,
+  createWalletClient, createPublicClient, http, type Hex, parseEther,
 } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { type NetworkKey, NETWORKS } from '../config/networks';
@@ -15,18 +16,55 @@ import { decodeContractError } from '../lib/errors';
 import { callWeatherApi, type LogEntry, type DemoApiConfig } from '../lib/demoApi';
 import { getGasOverrides } from '../lib/gas';
 
+import { ReplayPanel, CheatStep, Step6, StepCard, primaryBtn, ghostBtn } from './DemoHelpers';
+
 interface Props { net: NetworkKey }
 
 const CITIES = ['Paris', 'Tokyo', 'Lima'];
 const LS_PREFIX = 'usdc-ppr:demo-agent:';
+const PRICE_CAP = parseEther('0.05');
 
 function lsKey(net: NetworkKey) { return LS_PREFIX + net; }
-
 function readAgentKey(net: NetworkKey): Hex | null {
   try { const v = localStorage.getItem(lsKey(net)); return v?.startsWith('0x') ? v as Hex : null; } catch { return null; }
 }
 function saveAgentKey(net: NetworkKey, pk: Hex) { try { localStorage.setItem(lsKey(net), pk); } catch { /* ignore */ } }
 function removeAgentKey(net: NetworkKey) { try { localStorage.removeItem(lsKey(net)); } catch { /* ignore */ } }
+
+// Generic decoded log row (viem's Log<bigint,number,false,ABI,...> has .args; plain Log does not)
+type DecodedLog = { args: Record<string, unknown>; blockNumber: bigint | null; transactionHash: string | null };
+const EMPTY_LOGS: DecodedLog[] = [];
+
+// ------- Paid event type -------
+const PAID_EVENT = {
+  type: 'event' as const,
+  name: 'Paid' as const,
+  inputs: [
+    { name: 'endpointId', type: 'uint256', indexed: true },
+    { name: 'requestId', type: 'bytes32', indexed: true },
+    { name: 'payer', type: 'address', indexed: true },
+    { name: 'payee', type: 'address', indexed: false },
+    { name: 'amount', type: 'uint256', indexed: false },
+  ],
+};
+const REFUNDED_EVENT = {
+  type: 'event' as const, name: 'Refunded' as const,
+  inputs: [
+    { name: 'endpointId', type: 'uint256', indexed: true },
+    { name: 'requestId', type: 'bytes32', indexed: true },
+    { name: 'payer', type: 'address', indexed: true },
+    { name: 'amount', type: 'uint256', indexed: false },
+  ],
+};
+
+interface ReplayEvent {
+  blockNumber: bigint;
+  txHash: string;
+  type: 'Paid' | 'Refunded' | 'PriceChanged' | 'ActiveSet' | 'Withdrawn';
+  requestId?: string;
+  payer?: string;
+  amount?: bigint;
+}
 
 export function DemoPage({ net }: Props) {
   const cfg = NETWORKS[net];
@@ -34,13 +72,13 @@ export function DemoPage({ net }: Props) {
   const { switchChain } = useSwitchChain();
   const publicClient = usePublicClient({ chainId: cfg.chain.id });
 
-  // Step states
   const [agentKey, setAgentKey] = useState<Hex | null>(() => readAgentKey(net));
-  // endpointId is derived from the chain read, not local state
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<Record<string, { data?: unknown; error?: string; txHash?: string }>>({});
+  const [results, setResults] = useState<Record<string, { data?: unknown; txHash?: string; requestId?: Hex; price?: bigint }>>({});
   const [step, setStep] = useState(1);
+  const [replay, setReplay] = useState<ReplayEvent[] | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
 
   const logRef = useRef<HTMLDivElement>(null);
   const logIdRef = useRef(0);
@@ -53,35 +91,27 @@ export function DemoPage({ net }: Props) {
   const agentAccount = agentKey ? privateKeyToAccount(agentKey) : null;
   const agentAddr = agentAccount?.address ?? null;
 
-  // Agent balance
   const { data: agentBalance, refetch: refetchAgentBalance } = useReadContract({
     address: cfg.address, abi: ABI, functionName: 'creditOf',
     args: [agentAddr ?? '0x0000000000000000000000000000000000000000'],
-    chainId: cfg.chain.id,
-    query: { enabled: !!agentAddr },
+    chainId: cfg.chain.id, query: { enabled: !!agentAddr },
   });
-
-  // Agent native balance via wagmi useBalance doesn't work for arbitrary keys; use publicClient
   const [agentNativeBal, setAgentNativeBal] = useState<bigint | null>(null);
   useEffect(() => {
     if (!agentAddr || !publicClient) return;
     publicClient.getBalance({ address: agentAddr }).then(setAgentNativeBal).catch(() => {});
   }, [agentAddr, publicClient]);
 
-  // My endpoints
   const { data: myEndpointIds, refetch: refetchEndpoints } = useReadContract({
     address: cfg.address, abi: ABI, functionName: 'endpointsOf',
     args: [address ?? '0x0000000000000000000000000000000000000000'],
     chainId: cfg.chain.id, query: { enabled: !!address },
   });
 
-  // Derive the demo endpoint id from the endpoint list (last one is the candidate)
   const endpointId = myEndpointIds && myEndpointIds.length > 0
-    ? myEndpointIds[myEndpointIds.length - 1]
-    : null;
+    ? myEndpointIds[myEndpointIds.length - 1] : null;
 
-  // Endpoint details of candidate
-  const { data: epData } = useReadContract({
+  const { data: epData, refetch: refetchEpData } = useReadContract({
     address: cfg.address, abi: ABI, functionName: 'getEndpoint',
     args: [endpointId ?? 0n], chainId: cfg.chain.id, query: { enabled: endpointId !== null },
   });
@@ -90,18 +120,90 @@ export function DemoPage({ net }: Props) {
     args: [endpointId ?? 0n], chainId: cfg.chain.id, query: { enabled: endpointId !== null },
   });
 
-  const isDemoEndpoint = epName === 'GET /v1/weather (demo)' && epData?.active;
-
+  const isDemoEndpoint = epName === 'GET /v1/weather (demo)' && !!epData?.active;
   const isCorrectChain = chainId === cfg.chain.id;
 
   const PRICE_WEI = net === 'mainnet' ? parseEther('0.01') : parseEther('0.05');
   const FUND_WEI = net === 'mainnet' ? parseEther('0.05') : parseEther('0.30');
 
+  // ── Replay: load events for cfg.demoEndpointId from the fixed window ──
+  const loadReplay = useCallback(async () => {
+    if (replayLoading) return;
+    setReplayLoading(true);
+    try {
+      const rpc = cfg.rpc;
+      const pc = createPublicClient({ chain: cfg.chain, transport: http(rpc) });
+      const from = cfg.deploymentBlock;
+      const to = cfg.deploymentBlock + 8999n;
+      const eid = cfg.demoEndpointId;
+      const addr = cfg.address;
+
+      // Fetch all event types in parallel — ONE getLogs window per type
+      const [paidLogs, refundedLogs, priceChangedLogs, activeSetLogs, withdrawnLogs] = await Promise.all([
+        pc.getLogs({ address: addr, event: PAID_EVENT, args: { endpointId: eid }, fromBlock: from, toBlock: to }).then(r => r as unknown as DecodedLog[]).catch(() => EMPTY_LOGS),
+        pc.getLogs({ address: addr, event: REFUNDED_EVENT, args: { endpointId: eid }, fromBlock: from, toBlock: to }).then(r => r as unknown as DecodedLog[]).catch(() => EMPTY_LOGS),
+        pc.getLogs({ address: addr, event: { type: 'event' as const, name: 'PriceChanged' as const, inputs: [{ name: 'id', type: 'uint256', indexed: true }, { name: 'oldPrice', type: 'uint256', indexed: false }, { name: 'newPrice', type: 'uint256', indexed: false }] }, args: { id: eid }, fromBlock: from, toBlock: to }).then(r => r as unknown as DecodedLog[]).catch(() => EMPTY_LOGS),
+        pc.getLogs({ address: addr, event: { type: 'event' as const, name: 'ActiveSet' as const, inputs: [{ name: 'id', type: 'uint256', indexed: true }, { name: 'active', type: 'bool', indexed: false }] }, args: { id: eid }, fromBlock: from, toBlock: to }).then(r => r as unknown as DecodedLog[]).catch(() => EMPTY_LOGS),
+        pc.getLogs({ address: addr, event: { type: 'event' as const, name: 'Withdrawn' as const, inputs: [{ name: 'account', type: 'address', indexed: true }, { name: 'to', type: 'address', indexed: true }, { name: 'amount', type: 'uint256', indexed: false }] }, fromBlock: from, toBlock: to }).then(r => r as unknown as DecodedLog[]).catch(() => EMPTY_LOGS),
+      ]);
+
+      const events: ReplayEvent[] = [];
+
+      for (const l of paidLogs) {
+        const a = l.args as { requestId?: Hex; payer?: string; amount?: bigint };
+        events.push({ blockNumber: l.blockNumber ?? 0n, txHash: l.transactionHash ?? '', type: 'Paid', requestId: a.requestId, payer: a.payer, amount: a.amount });
+      }
+      for (const l of refundedLogs) {
+        const a = l.args as { requestId?: Hex; payer?: string; amount?: bigint };
+        events.push({ blockNumber: l.blockNumber ?? 0n, txHash: l.transactionHash ?? '', type: 'Refunded', requestId: a.requestId, payer: a.payer, amount: a.amount });
+      }
+      for (const l of priceChangedLogs) {
+        const a = l.args as { oldPrice?: bigint; newPrice?: bigint };
+        events.push({ blockNumber: l.blockNumber ?? 0n, txHash: l.transactionHash ?? '', type: 'PriceChanged', amount: a.newPrice });
+      }
+      for (const l of activeSetLogs) {
+        const a = l.args as { active?: boolean };
+        events.push({ blockNumber: l.blockNumber ?? 0n, txHash: l.transactionHash ?? '', type: 'ActiveSet', payer: a.active ? 'resumed' : 'paused' });
+      }
+      for (const l of withdrawnLogs) {
+        const a = l.args as { account?: string; to?: string; amount?: bigint };
+        events.push({ blockNumber: l.blockNumber ?? 0n, txHash: l.transactionHash ?? '', type: 'Withdrawn', payer: a.account, amount: a.amount });
+      }
+
+      events.sort((a, b) => (a.blockNumber < b.blockNumber ? -1 : a.blockNumber > b.blockNumber ? 1 : 0));
+      setReplay(events);
+    } catch {
+      setReplay([]);
+    }
+    setReplayLoading(false);
+  }, [cfg, replayLoading]);
+
+  // Auto-load replay when no wallet connected or not past step 3
+  // oxlint-disable react/set-state-in-effect
+  useEffect(() => {
+    if (!!(cfg.demoEndpointId > 0n) && (!address || step < 3) && replay === null && !replayLoading) {
+      void loadReplay();
+    }
+  // oxlint-enable react/set-state-in-effect
+  }, [cfg.demoEndpointId, address, step, replay, replayLoading, loadReplay]);
+
+  // Endpoint totals for replay footer
+  const { data: demoEpData } = useReadContract({
+    address: cfg.address, abi: ABI, functionName: 'getEndpoint',
+    args: [cfg.demoEndpointId], chainId: cfg.chain.id,
+    query: { enabled: cfg.demoEndpointId > 0n },
+  });
+  const demoPayee = demoEpData?.payee;
+  const { data: payeeCredit } = useReadContract({
+    address: cfg.address, abi: ABI, functionName: 'creditOf',
+    args: [demoPayee ?? '0x0000000000000000000000000000000000000000'],
+    chainId: cfg.chain.id, query: { enabled: !!demoPayee },
+  });
+
   // Register endpoint
   const { writeContract: writeRegister, data: regHash, isPending: regPending } = useWriteContract();
   const { isLoading: regConfirming } = useWaitForTransactionReceipt({ hash: regHash });
 
-  // Fund agent (sendTransaction, not writeContract)
   const { sendTransaction: sendFund, data: fundHash, isPending: fundPending } = useSendTransaction();
   const { isLoading: fundConfirming } = useWaitForTransactionReceipt({ hash: fundHash });
 
@@ -111,11 +213,7 @@ export function DemoPage({ net }: Props) {
     setAgentKey(pk);
     setStep(s => Math.max(s, 2));
   };
-
-  const handleForgetKey = () => {
-    removeAgentKey(net);
-    setAgentKey(null);
-  };
+  const handleForgetKey = () => { removeAgentKey(net); setAgentKey(null); };
 
   const handleFundAgent = () => {
     if (!agentAddr || !isCorrectChain) return;
@@ -128,13 +226,17 @@ export function DemoPage({ net }: Props) {
   const handleRegisterEndpoint = () => {
     if (!address || !isCorrectChain) return;
     writeRegister({ address: cfg.address, abi: ABI, functionName: 'registerEndpoint', args: [PRICE_WEI as unknown as bigint & { __tag: 'uint128' }, address, 'GET /v1/weather (demo)'], chainId: cfg.chain.id }, {
-      onSuccess: h => { toast.success('Demo endpoint registered', { description: <a href={txUrl(cfg.explorer, h)} target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>View</a> }); setStep(3); },
+      onSuccess: h => {
+        toast.success('Demo endpoint registered', { description: <a href={txUrl(cfg.explorer, h)} target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>View</a> });
+        void refetchEndpoints();
+        setStep(3);
+      },
       onError: err => toast.error(decodeContractError(err)),
     });
   };
 
+  // ── Run agent for a city ──
   // oxlint-disable react/purity
-  // Run agent for a city — async event handler (never called during render)
   const handleRunCity = async (city: string) => {
     if (!agentKey || !agentAddr || !endpointId || !epData || !publicClient) return;
     setRunning(true);
@@ -143,46 +245,65 @@ export function DemoPage({ net }: Props) {
     const tStart = performance.now();
 
     const apiCfg: DemoApiConfig = {
-      chainId: cfg.chain.id,
-      chain: cfg.chain,
-      contractAddress: cfg.address,
-      endpointId,
-      price: epData.price,
-      explorer: cfg.explorer,
+      chainId: cfg.chain.id, chain: cfg.chain,
+      contractAddress: cfg.address, endpointId, price: epData.price, explorer: cfg.explorer,
     };
-
     const agentWallet = createWalletClient({ account: agentAccount!, chain: cfg.chain, transport: http(cfg.rpc) });
 
     try {
-      // Step 1: call API (no token) → 402
+      // 402 phase
       addLog({ id: nextId(), voice: 'agent', msg: `Requesting ${city} weather from API…` });
+      const t402 = performance.now();
       const resp402 = await callWeatherApi({ cfg: apiCfg, city, payer: agentAddr, publicClient, onLog: addLog });
+      const ms402 = Math.round(performance.now() - t402);
       if (resp402.status !== 402 || !('token' in resp402)) {
         addLog({ id: nextId(), voice: 'api', msg: `Unexpected response ${resp402.status}`, error: true });
-        setRunning(false);
-        return;
+        setRunning(false); return;
       }
+      addLog({ id: nextId(), voice: 'agent', msg: `Got 402 in ${ms402}ms` });
 
       const { token, requestId } = resp402;
       const accept = resp402.body.accepts[0];
       const price = BigInt(accept.amount);
 
-      // Step 2: agent validates
-      addLog({ id: nextId(), voice: 'agent', msg: `Got 402 — price ${formatUsdc(price)} USDC, payTo ${accept.payTo.slice(0, 8)}… — validating…` });
-
+      // Agent safety checks (F2)
+      addLog({ id: nextId(), voice: 'agent', msg: `Validating: payTo, price cap, payerOf, canPay…` });
       if (accept.payTo.toLowerCase() !== cfg.address.toLowerCase()) {
         addLog({ id: nextId(), voice: 'agent', msg: `REJECT: payTo is not our known contract`, error: true });
-        setRunning(false);
-        return;
+        setRunning(false); return;
       }
-      if (price > parseEther('0.06')) {
-        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: price too high (${formatUsdc(price)} USDC)`, error: true });
-        setRunning(false);
-        return;
+      if (price > PRICE_CAP) {
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: price ${formatUsdc(price)} USDC > cap 0.05`, error: true });
+        setRunning(false); return;
       }
-      addLog({ id: nextId(), voice: 'agent', msg: `Validation passed — paying via pay(${endpointId}, ${requestId.slice(0, 10)}…)` });
+      // payerOf check
+      let onChainPayer: string;
+      try {
+        onChainPayer = await publicClient.readContract({ address: cfg.address, abi: ABI, functionName: 'payerOf', args: [requestId] });
+      } catch (e) {
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: payerOf() failed: ${decodeContractError(e)}`, error: true });
+        setRunning(false); return;
+      }
+      if (onChainPayer.toLowerCase() !== agentAddr.toLowerCase()) {
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: payerOf=${formatAddr(onChainPayer)} ≠ agent`, error: true });
+        setRunning(false); return;
+      }
+      // canPay check
+      let canPayResult: readonly [boolean, number];
+      try {
+        canPayResult = await publicClient.readContract({ address: cfg.address, abi: ABI, functionName: 'canPay', args: [endpointId, requestId, agentAddr, price] });
+      } catch (e) {
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: canPay() reverted: ${decodeContractError(e)}`, error: true });
+        setRunning(false); return;
+      }
+      if (!canPayResult[0]) {
+        const reasons = ['OK', 'UnknownEndpoint', 'EndpointInactive', 'WrongAmount', 'AlreadyPaid', 'RequestNotForPayer'];
+        addLog({ id: nextId(), voice: 'agent', msg: `REJECT: canPay failed — ${reasons[canPayResult[1]] ?? `reason ${canPayResult[1]}`}`, error: true });
+        setRunning(false); return;
+      }
+      addLog({ id: nextId(), voice: 'agent', msg: `Checks passed — payerOf ✓, canPay ✓ — paying…` });
 
-      // Step 3: pay
+      // pay()
       const tPay = performance.now();
       let gasOpts = {};
       try { gasOpts = await getGasOverrides(publicClient); } catch { /* ignore */ }
@@ -190,18 +311,13 @@ export function DemoPage({ net }: Props) {
       try {
         payHash = await agentWallet.writeContract({
           address: cfg.address, abi: ABI, functionName: 'pay',
-          args: [endpointId, requestId],
-          value: price,
-          chain: cfg.chain,
-          account: agentAccount!,
-          ...gasOpts,
+          args: [endpointId, requestId], value: price,
+          chain: cfg.chain, account: agentAccount!, ...gasOpts,
         });
       } catch (e) {
         addLog({ id: nextId(), voice: 'contract', msg: `pay() failed: ${decodeContractError(e)}`, error: true });
-        setRunning(false);
-        return;
+        setRunning(false); return;
       }
-
       addLog({ id: nextId(), voice: 'agent', msg: `pay() submitted`, link: txUrl(cfg.explorer, payHash), linkLabel: 'View tx' });
 
       let receipt;
@@ -209,14 +325,12 @@ export function DemoPage({ net }: Props) {
         receipt = await publicClient.waitForTransactionReceipt({ hash: payHash, timeout: 60_000 });
       } catch {
         addLog({ id: nextId(), voice: 'contract', msg: `Timed out waiting for receipt`, error: true });
-        setRunning(false);
-        return;
+        setRunning(false); return;
       }
-
       const payMs = Math.round(performance.now() - tPay);
       addLog({ id: nextId(), voice: 'contract', msg: `Confirmed in block ${receipt.blockNumber} (${(payMs / 1000).toFixed(1)}s)`, link: txUrl(cfg.explorer, payHash), linkLabel: 'View tx', durationMs: payMs });
 
-      // Step 4: retry with token + tx
+      // Verify
       addLog({ id: nextId(), voice: 'agent', msg: `Retrying with X-Paywall-Token + X-Paywall-Tx…` });
       const tVerify = performance.now();
       const resp200 = await callWeatherApi({ cfg: apiCfg, city, payer: agentAddr, token, txHash: payHash, publicClient, onLog: addLog });
@@ -224,18 +338,18 @@ export function DemoPage({ net }: Props) {
 
       if (resp200.status === 200 && 'body' in resp200 && 'temperatureC' in resp200.body) {
         const wb = resp200.body as { temperatureC: number; conditions: string };
-        addLog({ id: nextId(), voice: 'api', msg: `Served — ${city}: ${String(wb.temperatureC)}°C, ${wb.conditions} (verified in ${verifyMs}ms)`, durationMs: verifyMs });
-        setResults(prev => ({ ...prev, [city]: { data: resp200.body, txHash: payHash } }));
+        addLog({ id: nextId(), voice: 'api', msg: `Served — ${city}: ${String(wb.temperatureC)}°C, ${String(wb.conditions)} (verified in ${verifyMs}ms)`, durationMs: verifyMs });
+        setResults(prev => ({ ...prev, [city]: { data: resp200.body, txHash: payHash, requestId, price } }));
         setStep(s => Math.max(s, 5));
         void refetchAgentBalance();
+        void refetchEpData();
         void publicClient.getBalance({ address: agentAddr }).then(setAgentNativeBal).catch(() => {});
       } else {
         addLog({ id: nextId(), voice: 'api', msg: `Verification failed: ${JSON.stringify('body' in resp200 ? resp200.body : {})}`, error: true });
       }
 
       const totalMs = Math.round(performance.now() - tStart);
-      addLog({ id: nextId(), voice: 'agent', msg: `Done — 402 in ~3ms, paid in ${(payMs / 1000).toFixed(1)}s, verified in ${verifyMs}ms, total ${(totalMs / 1000).toFixed(1)}s` });
-
+      addLog({ id: nextId(), voice: 'agent', msg: `Done — 402 in ${ms402}ms, paid in ${(payMs / 1000).toFixed(1)}s, verified in ${verifyMs}ms, total ${(totalMs / 1000).toFixed(1)}s` });
     } catch (e) {
       addLog({ id: nextId(), voice: 'agent', msg: `Error: ${decodeContractError(e)}`, error: true });
     }
@@ -243,7 +357,6 @@ export function DemoPage({ net }: Props) {
   };
   // oxlint-enable react/purity
 
-  // Sweep agent back to wallet
   const handleSweep = async () => {
     if (!agentKey || !agentAddr || !address || !publicClient) return;
     const balance = await publicClient.getBalance({ address: agentAddr });
@@ -258,13 +371,13 @@ export function DemoPage({ net }: Props) {
     try {
       const hash = await agentWallet.sendTransaction({ to: address, value, chain: cfg.chain, account: agentAccount!, ...gasOpts });
       toast.success('Swept agent balance', { description: <a href={txUrl(cfg.explorer, hash)} target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>View</a> });
+      removeAgentKey(net); setAgentKey(null);
     } catch (e) { toast.error(decodeContractError(e)); }
   };
 
-  // Cheat scenarios
-  const firstSuccess = Object.entries(results).find(([, r]) => r.txHash);
-  const firstCity = firstSuccess?.[0] ?? null;
-  const firstTx = firstSuccess?.[1]?.txHash ?? null;
+  const firstSuccess = Object.entries(results).find(([, r]) => r.txHash && r.requestId);
+  const parisResult = results['Paris'] ?? null;
+  const tokyoResult = results['Tokyo'] ?? null;
 
   return (
     <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 16px' }}>
@@ -276,7 +389,20 @@ export function DemoPage({ net }: Props) {
         <code className="mono" style={{ fontSize: 12 }}>node verifier/server.mjs</code>.
       </p>
 
-      {/* Step 1: Connect wallet */}
+      {/* Replay panel: shown when no wallet or before step 3 */}
+      {!!(cfg.demoEndpointId > 0n) && (!address || step < 3) && (
+        <ReplayPanel
+          net={net}
+          endpointId={cfg.demoEndpointId}
+          events={replay}
+          loading={replayLoading}
+          epData={demoEpData}
+          payeeCredit={payeeCredit}
+          onReload={() => { void loadReplay(); }}
+        />
+      )}
+
+      {/* Step 1 */}
       <StepCard n={1} title="Connect wallet" done={!!address} active={step >= 1}>
         {address ? (
           <p style={{ fontSize: 13, color: 'var(--success)', margin: 0 }}>Connected: <span className="mono" style={{ fontSize: 12 }}>{formatAddr(address)}</span></p>
@@ -285,28 +411,26 @@ export function DemoPage({ net }: Props) {
         )}
       </StepCard>
 
-      {/* Step 2: Agent key */}
+      {/* Step 2 */}
       <StepCard n={2} title="Create agent key" done={!!agentAddr} active={!!address}>
         {!agentKey ? (
           <div>
-            <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
-              Generate a throwaway key for this demo. It lives in localStorage — never use it for real funds.
-            </p>
+            <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 12px', lineHeight: 1.5 }}>Generate a throwaway key. Stored in localStorage — never use for real funds.</p>
             <button onClick={handleGenerateKey} style={primaryBtn}>Generate agent key</button>
           </div>
         ) : (
           <div>
             <p style={{ fontSize: 13, color: '#92400e', background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px', margin: '0 0 12px', lineHeight: 1.5 }}>
-              Hot key for this demo only — stored in your browser, never use for real funds.
+              Hot key for demo only — stored in browser.
             </p>
-            <div style={{ fontSize: 13, marginBottom: 10 }}>
-              Address: <span className="mono" style={{ fontSize: 12 }}>{agentAddr}</span>
-            </div>
+            <div style={{ fontSize: 13, marginBottom: 10 }}>Address: <span className="mono" style={{ fontSize: 12 }}>{agentAddr}</span></div>
             <div style={{ fontSize: 13, marginBottom: 12 }}>
-              Balance:{' '}
-              <span style={{ fontWeight: 600, tabularNums: true } as React.CSSProperties}>
+              Balance: <span style={{ fontWeight: 600, tabularNums: true } as React.CSSProperties}>
                 {agentNativeBal !== null ? formatUsdc(agentNativeBal) : '—'} USDC
               </span>
+              {agentBalance !== undefined && agentBalance > 0n && (
+                <span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>credit: {formatUsdc(agentBalance)}</span>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button onClick={handleFundAgent} disabled={!address || !isCorrectChain || fundPending || fundConfirming} style={primaryBtn}>
@@ -330,7 +454,7 @@ export function DemoPage({ net }: Props) {
         ) : endpointId && epData && !isDemoEndpoint ? (
           <div>
             <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 10px' }}>
-              Your most recent endpoint is "{ epName || `#${endpointId}`}". It doesn't match the demo name. Register a fresh demo endpoint below.
+              Your most recent endpoint is "{epName || `#${endpointId}`}". Register a fresh demo endpoint below.
             </p>
             <button onClick={handleRegisterEndpoint} disabled={!address || !isCorrectChain || regPending || regConfirming} style={primaryBtn}>
               {regPending ? 'Confirm…' : regConfirming ? 'Confirming…' : 'Register my demo endpoint'}
@@ -339,7 +463,7 @@ export function DemoPage({ net }: Props) {
         ) : (
           <div>
             <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 10px' }}>
-              Registers a "GET /v1/weather (demo)" endpoint with price {net === 'mainnet' ? '0.01' : '0.05'} USDC, payee = your wallet.
+              Registers a "GET /v1/weather (demo)" endpoint with price {net === 'mainnet' ? '0.01' : '0.05'} USDC.
             </p>
             <button onClick={handleRegisterEndpoint} disabled={!address || !isCorrectChain || regPending || regConfirming} style={{ ...primaryBtn, opacity: (!address || !isCorrectChain) ? 0.5 : 1 }}>
               {regPending ? 'Confirm…' : regConfirming ? 'Confirming…' : 'Register my demo endpoint'}
@@ -352,14 +476,13 @@ export function DemoPage({ net }: Props) {
       <StepCard n={4} title="Run agent" done={Object.keys(results).length > 0} active={!!agentKey && !!isDemoEndpoint}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: logs.length > 0 ? 16 : 0 }}>
           {CITIES.map(city => (
-            <button key={city} onClick={() => { void handleRunCity(city); }} disabled={running || !agentKey || !isDemoEndpoint}
+            <button key={city} onClick={() => { void handleRunCity(city); }}
+              disabled={running || !agentKey || !isDemoEndpoint}
               style={{ ...primaryBtn, opacity: (!agentKey || !isDemoEndpoint || running) ? 0.5 : 1 }}>
               {running ? '…' : `Buy ${city} weather`}
             </button>
           ))}
         </div>
-
-        {/* Live log */}
         {logs.length > 0 && (
           <div ref={logRef} style={{ background: '#0d1b2f', borderRadius: 10, padding: '12px 14px', maxHeight: 280, overflowY: 'auto', marginTop: 12, fontSize: 12 }}>
             {logs.map(e => (
@@ -369,17 +492,13 @@ export function DemoPage({ net }: Props) {
                 </span>
                 <span style={{ color: e.error ? '#fca5a5' : '#e2e8f0', lineHeight: 1.5, flex: 1 }}>
                   {e.msg}
-                  {e.link ? (
-                    <> · <a href={e.link} target="_blank" rel="noopener noreferrer" style={{ color: '#93c5fd' }}>{e.linkLabel ?? 'link'}</a></>
-                  ) : null}
+                  {e.link ? <> · <a href={e.link} target="_blank" rel="noopener noreferrer" style={{ color: '#93c5fd' }}>{e.linkLabel ?? 'link'}</a></> : null}
                   {e.durationMs !== undefined && <span style={{ color: '#64748b' }}> ({e.durationMs}ms)</span>}
                 </span>
               </div>
             ))}
           </div>
         )}
-
-        {/* Results */}
         {Object.entries(results).map(([city, r]) => r.data ? (
           <div key={city} style={{ background: 'var(--surface-muted)', border: '1px solid var(--border)', borderRadius: 10, padding: '12px 14px', marginTop: 10, fontSize: 13 }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>{city}</div>
@@ -390,101 +509,37 @@ export function DemoPage({ net }: Props) {
         ) : null)}
       </StepCard>
 
-      {/* Step 5: Try to cheat */}
-      {step >= 5 && firstTx && firstCity && (
-        <CheatStep net={net} city={firstCity} txHash={firstTx as Hex} endpointId={endpointId!} />
+      {/* Step 5: Cheat panel */}
+      {step >= 5 && firstSuccess && firstSuccess[1].txHash && firstSuccess[1].requestId && endpointId !== null && (
+        <CheatStep
+          net={net}
+          city={firstSuccess[0]}
+          txHash={firstSuccess[1].txHash as Hex}
+          requestId={firstSuccess[1].requestId}
+          price={firstSuccess[1].price ?? PRICE_WEI}
+          endpointId={endpointId}
+          agentAddr={agentAddr ?? '0x0000000000000000000000000000000000000000'}
+          connectedAddr={address ?? '0x0000000000000000000000000000000000000000'}
+          agentKey={agentKey}
+        />
       )}
 
-      {/* Step 6: Final accounting */}
-      {step >= 5 && agentAddr && (
-        <StepCard n={6} title="Accounting" done={false} active>
-          <FinalAccounting net={net} address={address ?? null} agentAddr={agentAddr} onSweep={() => { void handleSweep(); }} />
-        </StepCard>
+      {/* Step 6: Actions + accounting */}
+      {step >= 5 && endpointId !== null && !!address && (
+        <Step6
+          net={net}
+          endpointId={endpointId}
+          address={address}
+          agentAddr={agentAddr}
+          agentKey={agentKey}
+          agentAccount={agentAccount}
+          parisResult={parisResult}
+          tokyoResult={tokyoResult}
+          isCorrectChain={isCorrectChain}
+          onSweep={handleSweep}
+          onDone={() => { void refetchEpData(); void refetchAgentBalance(); }}
+        />
       )}
     </div>
   );
 }
-
-function CheatStep({ net, city, txHash, endpointId }: { net: NetworkKey; city: string; txHash: Hex; endpointId: bigint }) {
-  const cfg = NETWORKS[net];
-  const { address, chainId } = useAccount();
-  const { switchChain } = useSwitchChain();
-
-  return (
-    <StepCard n={5} title="Try to cheat" done={false} active>
-      <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 14px', lineHeight: 1.5 }}>
-        These calls cost no gas — they are read-only preflight checks. See what the contract says.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <CheatRow label={`Reuse ${city} tx for Rome`} description="API says no_matching_payment — the requestId was bound to Paris, not Rome." />
-        <CheatRow label="Pay Paris again" description="canPay returns AlreadyPaid — the contract never charges twice for the same requestId." />
-        <CheatRow label="Another address pays your requestId" description="canPay returns RequestNotForPayer — top 20 bytes of requestId = you." />
-        <div style={{ marginTop: 8 }}>
-          <a href={txUrl(cfg.explorer, txHash)} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: 'var(--accent)' }}>
-            View the original pay() tx on explorer
-          </a>
-        </div>
-      </div>
-    </StepCard>
-  );
-}
-
-function CheatRow({ label, description }: { label: string; description: string }) {
-  return (
-    <div style={{ background: 'var(--surface-muted)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px' }}>
-      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>{description}</div>
-    </div>
-  );
-}
-
-function FinalAccounting({ net, address, agentAddr, onSweep }: { net: NetworkKey; address: string | null; agentAddr: string; onSweep: () => void }) {
-  const cfg = NETWORKS[net];
-  const { data: walletCredit } = useReadContract({ address: cfg.address, abi: ABI, functionName: 'creditOf', args: [address as Hex ?? '0x0000000000000000000000000000000000000000'], chainId: cfg.chain.id, query: { enabled: !!address } });
-  const { data: globalPaid } = useReadContract({ address: cfg.address, abi: ABI, functionName: 'totalPaid', chainId: cfg.chain.id });
-  const { data: globalRefunded } = useReadContract({ address: cfg.address, abi: ABI, functionName: 'totalRefunded', chainId: cfg.chain.id });
-  const { data: globalWithdrawn } = useReadContract({ address: cfg.address, abi: ABI, functionName: 'totalWithdrawn', chainId: cfg.chain.id });
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <Row label="Your credit" value={walletCredit !== undefined ? `${formatUsdc(walletCredit)} USDC` : '—'} />
-      <Row label="Global paid" value={globalPaid !== undefined ? `${formatUsdc(globalPaid)} USDC` : '—'} />
-      <Row label="Global refunded" value={globalRefunded !== undefined ? `${formatUsdc(globalRefunded)} USDC` : '—'} />
-      <Row label="Global withdrawn" value={globalWithdrawn !== undefined ? `${formatUsdc(globalWithdrawn)} USDC` : '—'} />
-      <button onClick={onSweep} style={{ ...ghostBtn, alignSelf: 'flex-start', marginTop: 8 }}>Sweep agent key back to my wallet</button>
-    </div>
-  );
-}
-
-function StepCard({ n, title, done, active, children }: { n: number; title: string; done: boolean; active: boolean; children: React.ReactNode }) {
-  return (
-    <div style={{ background: active ? 'var(--surface-strong)' : 'var(--surface-muted)', border: `1px solid ${active ? 'var(--border-strong)' : 'var(--border)'}`, borderRadius: 14, padding: '20px', marginBottom: 16, backdropFilter: 'blur(8px)', opacity: active ? 1 : 0.6 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <div style={{ width: 26, height: 26, borderRadius: '50%', background: done ? 'var(--success)' : active ? '#E3242B' : 'var(--border)', color: '#fff', fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontFamily: "'Space Grotesk', sans-serif" }}>
-          {done ? '✓' : n}
-        </div>
-        <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", color: 'var(--ink)', letterSpacing: '-0.02em' }}>{title}</h2>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid var(--border)', fontSize: 13 }}>
-      <span style={{ color: 'var(--muted)' }}>{label}</span>
-      <span style={{ fontWeight: 600, tabularNums: true } as React.CSSProperties}>{value}</span>
-    </div>
-  );
-}
-
-const primaryBtn: React.CSSProperties = {
-  padding: '10px 18px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 8,
-  fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif",
-};
-
-const ghostBtn: React.CSSProperties = {
-  padding: '9px 16px', background: 'transparent', color: 'var(--ink-2)', border: '1px solid var(--border)', borderRadius: 8,
-  fontSize: 14, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif",
-};

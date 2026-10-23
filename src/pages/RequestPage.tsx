@@ -40,36 +40,23 @@ export function RequestPage({ net, requestId }: Props) {
   const [paidTxHash, setPaidTxHash] = useState<string | null>(null);
   const [blockNumber, setBlockNumber] = useState<bigint | null>(null);
 
+  // F6: single-block getLogs using payment.paidBlock — no range scan needed
   useEffect(() => {
-    if (!publicClient || !isValidRid || !payment || payment.payer === ZERO_ADDR) return;
+    if (!publicClient || !isValidRid || !payment || payment.payer === ZERO_ADDR || !payment.paidBlock) return;
     let cancelled = false;
+    const paidBlock = BigInt(payment.paidBlock);
     void (async () => {
       try {
-        const currentBlock = await publicClient.getBlockNumber();
-        const from = cfg.deploymentBlock;
-        const to = currentBlock;
-        // Single getLogs call (bounded by deployment block, Arc is fast)
-        const CHUNK = 9000n;
-        let found = false;
-        for (let start = from; start <= to && !found; start += CHUNK) {
-          if (cancelled) return;
-          const end = start + CHUNK - 1n < to ? start + CHUNK - 1n : to;
-          try {
-            const logs = await publicClient.getLogs({
-              address: cfg.address,
-              event: { type: 'event', name: 'Paid', inputs: [{ type: 'uint256', name: 'endpointId', indexed: true }, { type: 'bytes32', name: 'requestId', indexed: true }, { type: 'address', name: 'payer', indexed: true }, { type: 'address', name: 'payee', indexed: false }, { type: 'uint256', name: 'amount', indexed: false }] },
-              args: { requestId: requestId as Hex },
-              fromBlock: start,
-              toBlock: end,
-            });
-            if (logs.length > 0) {
-              if (!cancelled) {
-                setPaidTxHash(logs[0].transactionHash);
-                setBlockNumber(logs[0].blockNumber ?? null);
-              }
-              found = true;
-            }
-          } catch { break; }
+        const logs = await publicClient.getLogs({
+          address: cfg.address,
+          event: { type: 'event', name: 'Paid', inputs: [{ type: 'uint256', name: 'endpointId', indexed: true }, { type: 'bytes32', name: 'requestId', indexed: true }, { type: 'address', name: 'payer', indexed: true }, { type: 'address', name: 'payee', indexed: false }, { type: 'uint256', name: 'amount', indexed: false }] },
+          args: { requestId: requestId as Hex },
+          fromBlock: paidBlock,
+          toBlock: paidBlock,
+        });
+        if (!cancelled && logs.length > 0) {
+          setPaidTxHash(logs[0].transactionHash);
+          setBlockNumber(logs[0].blockNumber ?? null);
         }
       } catch { /* ignore */ }
     })();
