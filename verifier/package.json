@@ -1,0 +1,14 @@
+{
+  "name": "arc-paywall-verifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal HTTP 402 API server that verifies USDC Pay-per-Request payments on Arc (no dependencies, no secrets).",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/verifier.test.mjs"
+  },
+  "dependencies": {}
+}
