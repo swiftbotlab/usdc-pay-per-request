@@ -134,7 +134,8 @@ export function DemoPage({ net }: Props) {
       const rpc = cfg.rpc;
       const pc = createPublicClient({ chain: cfg.chain, transport: http(rpc) });
       const from = cfg.deploymentBlock;
-      const to = cfg.deploymentBlock + 8999n;
+      const head = await pc.getBlockNumber();
+      const to = cfg.deploymentBlock + 8999n < head ? cfg.deploymentBlock + 8999n : head; // the RPC rejects a toBlock beyond the head
       const eid = cfg.demoEndpointId;
       const addr = cfg.address;
 

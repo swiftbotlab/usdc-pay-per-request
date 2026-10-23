@@ -181,6 +181,8 @@ Measured on mainnet: pay -> receipt 0.34-1.03 s, server-side verification 0.67-0
   standalone paying client) are ours.
 - One hand fix (disclosed): the first production build crashed because its CSP (`style-src 'self'`) blocked the styles
   ConnectKit injects; we patched `vite.config.ts` by hand (commit 3e1fdf1) and Studio's next turn made the identical change.
+- Hand fix 2 (disclosed, 2 lines in `src/pages/DemoPage.tsx`): the demo replay asked for logs up to `deploymentBlock + 8999`,
+  which the Arc RPC rejects while that block is still in the future; the window now ends at the current head.
 - GitHub Pages: `.github/workflows/pages.yml` runs the same Vite build Studio ran (bun, frozen lockfile), because the
   Studio workspace export does not include `dist/`.
 
